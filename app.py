@@ -3,7 +3,10 @@ Thyroid Disorder Detection — Streamlit Demo
 Stacking Ensemble: RF + XGB → LogisticRegression meta-learner
 Pipeline exactly matches 02.ipynb (Steps 1–19)
 """
+import sys
+import streamlit as st
 
+st.write(sys.version)
 import warnings
 warnings.filterwarnings("ignore")
 
