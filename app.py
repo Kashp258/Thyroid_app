@@ -1,14 +1,15 @@
 """
-Thyroid Disorder Detection — Streamlit Demo  v2.0
-Stacking Ensemble: RF + XGB → Logistic Regression meta-learner
+Thyroid Disorder Detection — Research Demo  v3.0
+Stacking Ensemble: RF + XGBoost → Logistic Regression meta-learner
+
+DESIGN PRINCIPLE: Every graph on screen must update when the user changes
+an input. No static paper-reproduction charts.
 
 Tabs:
-  1. Live Prediction        — manual biomarker input + calibrated risk
-  2. Sample from Dataset    — pick/random a row, compare true vs predicted
-  3. SHAP Explainability    — global importances + beeswarm-style bar + interaction heatmap
-  4. Model Performance      — ROC curves, calibration, bootstrap CIs, confusion matrix
-  5. Clinical Utility       — DCA, threshold sweep, robustness profile
-  6. Dataset Overview       — descriptive stats, class balance
+  1. Live Prediction   — biomarker input → risk score + gauge + instance SHAP
+  2. What-If Explorer  — sweep one feature, watch risk curve update live
+  3. Sample & Verify   — pick a real patient, predict, live confusion matrix
+  4. Research Summary  — text/tables only (no graphs), key findings from paper
 """
 
 import warnings
@@ -21,16 +22,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.gridspec import GridSpec
 
 from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.calibration import calibration_curve, CalibratedClassifierCV
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     roc_auc_score, accuracy_score, precision_score,
     recall_score, f1_score, brier_score_loss,
-    roc_curve, confusion_matrix,
+    confusion_matrix,
 )
 from xgboost import XGBClassifier
 
@@ -40,34 +39,32 @@ try:
 except ImportError:
     SHAP_OK = False
 
-# ──────────────────────────────────────────────────────────────────────
-# PALETTE  (clinical / research aesthetic — navy + teal + amber)
-# ──────────────────────────────────────────────────────────────────────
-C_NAVY   = "#1C3557"
-C_TEAL   = "#2A9D8F"
-C_AMBER  = "#E9C46A"
-C_RED    = "#E76F51"
-C_LGRAY  = "#F4F6F8"
-C_MGRAY  = "#DDE2E8"
-C_DGRAY  = "#5C6370"
+# ── Palette ───────────────────────────────────────────────────────────
+C_NAVY  = "#1C3557"
+C_TEAL  = "#2A9D8F"
+C_RED   = "#E76F51"
+C_AMBER = "#E9C46A"
+C_LGRAY = "#F4F6F8"
+C_MGRAY = "#DDE2E8"
+C_DGRAY = "#5C6370"
 
-PLT_STYLE = {
-    "axes.facecolor":  "#FAFBFC",
-    "figure.facecolor":"#FAFBFC",
-    "axes.edgecolor":  C_MGRAY,
-    "axes.grid":       True,
-    "grid.color":      C_MGRAY,
-    "grid.linewidth":  0.6,
-    "text.color":      C_NAVY,
-    "axes.labelcolor": C_NAVY,
-    "xtick.color":     C_DGRAY,
-    "ytick.color":     C_DGRAY,
-    "font.family":     "sans-serif",
+PLT_RC = {
+    "axes.facecolor":    "#FAFBFC",
+    "figure.facecolor":  "#FAFBFC",
+    "axes.edgecolor":    C_MGRAY,
+    "axes.grid":         True,
+    "grid.color":        C_MGRAY,
+    "grid.linewidth":    0.55,
+    "text.color":        C_NAVY,
+    "axes.labelcolor":   C_NAVY,
+    "xtick.color":       C_DGRAY,
+    "ytick.color":       C_DGRAY,
+    "font.family":       "sans-serif",
+    "axes.spines.top":   False,
+    "axes.spines.right": False,
 }
 
-# ──────────────────────────────────────────────────────────────────────
-# PAGE CONFIG
-# ──────────────────────────────────────────────────────────────────────
+# ── Page config ───────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Thyroid Disorder Detection · Research Demo",
     page_icon="🦋",
@@ -75,84 +72,51 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ──────────────────────────────────────────────────────────────────────
-# GLOBAL CSS
-# ──────────────────────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 
-  html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+.hero {
+  background: linear-gradient(135deg, #1C3557 0%, #2A9D8F 100%);
+  border-radius: 12px; padding: 24px 32px;
+  margin-bottom: 20px; color: white;
+}
+.hero h1 { font-size: 1.75rem; font-weight: 700; margin: 0; color: white; }
+.hero p  { font-size: 0.88rem; margin: 5px 0 0; opacity: 0.88; color: white; }
 
-  /* Header strip */
-  .research-header {
-    background: linear-gradient(135deg, #1C3557 0%, #2A9D8F 100%);
-    border-radius: 12px;
-    padding: 28px 36px;
-    margin-bottom: 24px;
-    color: white;
-  }
-  .research-header h1 { font-size: 1.9rem; font-weight: 700; margin: 0; color: white; }
-  .research-header p  { font-size: 0.92rem; margin: 6px 0 0; opacity: 0.85; color: white; }
+.kpi {
+  background: white; border: 1px solid #DDE2E8;
+  border-left: 4px solid #2A9D8F; border-radius: 10px;
+  padding: 14px 18px; margin: 3px 0;
+}
+.kpi .lbl { font-size: 0.72rem; font-weight: 700; color: #5C6370;
+            text-transform: uppercase; letter-spacing: 0.07em; }
+.kpi .val { font-size: 1.45rem; font-weight: 700; color: #1C3557; }
+.kpi .sub { font-size: 0.72rem; color: #5C6370; }
 
-  /* Metric cards */
-  .metric-card {
-    background: white;
-    border: 1px solid #DDE2E8;
-    border-left: 4px solid #2A9D8F;
-    border-radius: 10px;
-    padding: 16px 20px;
-    margin: 4px 0;
-  }
-  .metric-card .label { font-size: 0.78rem; font-weight: 600; color: #5C6370;
-                        text-transform: uppercase; letter-spacing: 0.06em; }
-  .metric-card .value { font-size: 1.55rem; font-weight: 700; color: #1C3557; }
-  .metric-card .sub   { font-size: 0.78rem; color: #5C6370; }
-
-  /* Insight boxes */
-  .insight-box {
-    background: #EEF7F6;
-    border-left: 4px solid #2A9D8F;
-    border-radius: 0 8px 8px 0;
-    padding: 12px 16px;
-    margin: 10px 0;
-    font-size: 0.88rem;
-    color: #1C3557;
-  }
-
-  /* Section label */
-  .sec-label {
-    font-size: 0.72rem;
-    font-weight: 700;
-    letter-spacing: 0.10em;
-    text-transform: uppercase;
-    color: #2A9D8F;
-    margin-bottom: 4px;
-  }
-
-  /* Risk badge */
-  .badge-abnormal {
-    background:#FDECEA; color:#C0392B; border:1.5px solid #E74C3C;
-    border-radius:20px; padding:4px 16px; font-weight:700; font-size:0.95rem;
-    display:inline-block;
-  }
-  .badge-normal {
-    background:#E8F8F5; color:#1A6645; border:1.5px solid #2A9D8F;
-    border-radius:20px; padding:4px 16px; font-weight:700; font-size:0.95rem;
-    display:inline-block;
-  }
-
-  /* Hide streamlit default top padding */
-  .block-container { padding-top: 1rem !important; }
-
-  /* Tab font */
-  button[data-baseweb="tab"] { font-size: 0.88rem; font-weight: 600; }
+.insight {
+  background: #EEF7F6; border-left: 4px solid #2A9D8F;
+  border-radius: 0 8px 8px 0; padding: 11px 15px;
+  margin: 10px 0; font-size: 0.86rem; color: #1C3557;
+}
+.warn-box {
+  background: #FFF4EC; border-left: 4px solid #E76F51;
+  border-radius: 0 8px 8px 0; padding: 11px 15px;
+  margin: 10px 0; font-size: 0.86rem; color: #7B2D00;
+}
+.paper-tag {
+  display: inline-block; background: #1C3557; color: white;
+  font-size: 0.70rem; font-weight: 700; letter-spacing: 0.08em;
+  border-radius: 4px; padding: 2px 8px; margin-left: 6px;
+}
+.block-container { padding-top: 0.8rem !important; }
+button[data-baseweb="tab"] { font-size: 0.87rem; font-weight: 600; }
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────────────────────────────
-# CONSTANTS
-# ──────────────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────
 FEATURES = ["age", "TSH", "T3", "TT4", "T4U", "FTI"]
 SEED     = 42
 
@@ -168,71 +132,37 @@ XGB_PARAMS = dict(
 )
 
 FEATURE_META = {
-    "age": dict(label="Age (years)",   min_value=0.01, max_value=455.0, value=35.0, step=1.0,
-                help="Patient age. Dataset range: 0.01–455",        normal="18–80 yrs"),
-    "TSH": dict(label="TSH (mIU/L)",   min_value=0.0,  max_value=478.0, value=1.3,  step=0.01,
-                help="Thyroid Stimulating Hormone. Normal ≈ 0.4–4.0",normal="0.4–4.0"),
-    "T3":  dict(label="T3 (nmol/L)",   min_value=0.0,  max_value=10.6,  value=1.9,  step=0.01,
-                help="Triiodothyronine. Normal ≈ 1.1–2.6",          normal="1.1–2.6"),
-    "TT4": dict(label="TT4 (nmol/L)",  min_value=0.0,  max_value=430.0, value=100.0,step=1.0,
-                help="Total Thyroxine. Normal ≈ 60–160",            normal="60–160"),
-    "T4U": dict(label="T4U (ratio)",   min_value=0.0,  max_value=2.12,  value=0.97, step=0.01,
-                help="Thyroxine Uptake ratio. Normal ≈ 0.9–1.1",    normal="0.9–1.1"),
-    "FTI": dict(label="FTI",           min_value=0.0,  max_value=395.0, value=106.0,step=1.0,
-                help="Free Thyroxine Index. Normal ≈ 70–130",       normal="70–130"),
+    "age": dict(label="Age",  lo=0.01, hi=455.0, default=35.0,  step=1.0,
+                normal="18-80",    unit="yrs",    tip="Patient age in years"),
+    "TSH": dict(label="TSH",  lo=0.0,  hi=478.0, default=1.3,   step=0.01,
+                normal="0.4-4.0",  unit="mIU/L",  tip="Thyroid Stimulating Hormone — primary HPT signal"),
+    "T3":  dict(label="T3",   lo=0.0,  hi=10.6,  default=1.9,   step=0.01,
+                normal="1.1-2.6",  unit="nmol/L", tip="Triiodothyronine — active thyroid hormone"),
+    "TT4": dict(label="TT4",  lo=0.0,  hi=430.0, default=100.0, step=1.0,
+                normal="60-160",   unit="nmol/L", tip="Total Thyroxine"),
+    "T4U": dict(label="T4U",  lo=0.0,  hi=2.12,  default=0.97,  step=0.01,
+                normal="0.9-1.1",  unit="ratio",  tip="Thyroxine Uptake ratio"),
+    "FTI": dict(label="FTI",  lo=0.0,  hi=395.0, default=106.0, step=1.0,
+                normal="70-130",   unit="index",  tip="Free Thyroxine Index"),
 }
 
-# Pre-computed research values (from paper — nested 10-fold CV)
-PAPER_METRICS = {
-    "Stacking": dict(AUC=0.9836, Acc=0.9462, Prec=0.5687, Rec=0.9245, F1=0.704),
-    "RF":       dict(AUC=0.9830, Acc=0.9430, Prec=0.5540, Rec=0.9493, F1=0.699),
-    "XGBoost":  dict(AUC=0.9832, Acc=0.9623, Prec=0.8224, Rec=0.5840, F1=0.682),
-    "MLP":      dict(AUC=0.8978, Acc=0.9287, Prec=0.4168, Rec=0.0609, F1=0.104),
-}
-PAPER_SHAP = {
-    "TSH": 0.2682, "TT4": 0.0565, "T3": 0.0534,
-    "FTI": 0.0480, "T4U": 0.0407, "age": 0.0051,
-}
-PAPER_INTERACTIONS = {
-    "TSH×T3":  0.036, "T3×TT4":  0.022,
-    "T3×FTI":  0.018, "TSH×TT4": 0.018, "TSH×FTI": 0.016,
-}
-PAPER_BOOT_CI = {
-    "AUC":      (0.9825, 0.9778, 0.9868),
-    "Accuracy": (0.9423, 0.9332, 0.9516),
-    "Recall":   (0.9593, 0.9261, 0.9879),
-    "F1-Score": (0.6963, 0.6500, 0.7426),
-}
-PAPER_ABLATION = {
-    "TSH": -0.143, "TT4": -0.003, "T3": -0.002,
-    "FTI": -0.001, "T4U": -0.001, "age": -0.000,
-}
-PAPER_NOISE_AUC    = [0.9836, 0.7350, 0.6933, 0.6625]
-PAPER_MISSING_AUC  = [0.9836, 0.9688, 0.9523, 0.9345]
-PAPER_NOISE_X      = ["Baseline", "5%",   "10%",  "20%"]
-PAPER_MISSING_X    = ["Baseline", "10%",  "20%",  "30%"]
-PAPER_CONFUSION    = [[11716, 197], [236, 651]]   # TN FP / FN TP
-PAPER_BRIER        = 0.0923
-OPTIMAL_THETA      = 0.25
 
-# ──────────────────────────────────────────────────────────────────────
-# DATA & MODEL
-# ──────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner="Loading harmonised dataset…")
-def load_data(path: str = "harmonised_dataset.csv") -> pd.DataFrame:
+# ── Data & model ──────────────────────────────────────────────────────
+@st.cache_data(show_spinner="Loading dataset…")
+def load_data(path="harmonised_dataset.csv"):
     df = pd.read_csv(path)
     df = df.drop(columns=["source"], errors="ignore")
-    for col in FEATURES:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+    for c in FEATURES:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
     df[FEATURES] = df[FEATURES].fillna(df[FEATURES].median())
     return df
 
 
 @st.cache_resource(show_spinner="Training stacking ensemble…")
-def build_model(df: pd.DataFrame):
+def build_model(df):
     X = df[FEATURES].values
     y = df["class"].values
-    X_tr, X_te, y_tr, y_te = train_test_split(
+    Xtr, Xte, ytr, yte = train_test_split(
         X, y, test_size=0.2, stratify=y, random_state=SEED
     )
     rf  = RandomForestClassifier(**RF_PARAMS, n_jobs=-1)
@@ -242,821 +172,771 @@ def build_model(df: pd.DataFrame):
         final_estimator=LogisticRegression(
             penalty="l2", C=1.0, max_iter=1000, class_weight="balanced"
         ),
-        stack_method="predict_proba",
-        n_jobs=-1, passthrough=False,
+        stack_method="predict_proba", n_jobs=-1, passthrough=False,
     )
-    stack.fit(X_tr, y_tr)
+    stack.fit(Xtr, ytr)
 
-    # Also train individual models for ROC comparison
-    rf2  = RandomForestClassifier(**RF_PARAMS, n_jobs=-1).fit(X_tr, y_tr)
-    xgb2 = XGBClassifier(**XGB_PARAMS, n_jobs=-1).fit(X_tr, y_tr)
+    # RF trained alone for SHAP (TreeExplainer needs a pure tree model)
+    rf_solo = RandomForestClassifier(**RF_PARAMS, n_jobs=-1).fit(Xtr, ytr)
 
-    y_prob_stack = stack.predict_proba(X_te)[:, 1]
-    y_prob_rf    = rf2.predict_proba(X_te)[:, 1]
-    y_prob_xgb   = xgb2.predict_proba(X_te)[:, 1]
-    y_pred       = (y_prob_stack >= 0.5).astype(int)
+    yprob = stack.predict_proba(Xte)[:, 1]
+    ypred = (yprob >= 0.5).astype(int)
 
-    roc_data = {
-        "Stacking": roc_curve(y_te, y_prob_stack),
-        "RF":       roc_curve(y_te, y_prob_rf),
-        "XGBoost":  roc_curve(y_te, y_prob_xgb),
-    }
+    live_metrics = dict(
+        AUC      =round(roc_auc_score(yte, yprob),                          4),
+        Accuracy =round(accuracy_score(yte, ypred),                          4),
+        Precision=round(precision_score(yte, ypred, zero_division=0),        4),
+        Recall   =round(recall_score(yte, ypred),                            4),
+        F1       =round(f1_score(yte, ypred),                                4),
+        Brier    =round(brier_score_loss(yte, yprob),                        4),
+    )
 
-    # Calibration
-    frac_pos, mean_pred = calibration_curve(y_te, y_prob_stack, n_bins=10)
-
-    test_metrics = {
-        "AUC":       round(roc_auc_score(y_te, y_prob_stack), 4),
-        "Accuracy":  round(accuracy_score(y_te, y_pred),      4),
-        "Precision": round(precision_score(y_te, y_pred, zero_division=0), 4),
-        "Recall":    round(recall_score(y_te, y_pred),        4),
-        "F1":        round(f1_score(y_te, y_pred),            4),
-        "Brier":     round(brier_score_loss(y_te, y_prob_stack), 4),
-    }
-
-    # Threshold sweep
-    thresholds = np.linspace(0.01, 0.99, 200)
-    f1s, recs, precs, accs = [], [], [], []
-    for t in thresholds:
-        yp = (y_prob_stack >= t).astype(int)
-        f1s.append(f1_score(y_te, yp, zero_division=0))
-        recs.append(recall_score(y_te, yp, zero_division=0))
-        precs.append(precision_score(y_te, yp, zero_division=0))
-        accs.append(accuracy_score(y_te, yp))
-
-    # DCA
-    prev = y_te.mean()
-    nb_model, nb_all = [], []
-    for t in thresholds:
-        if t >= 1: nb_model.append(0); nb_all.append(0); continue
-        yp = (y_prob_stack >= t).astype(int)
-        tp = ((yp == 1) & (y_te == 1)).sum()
-        fp = ((yp == 1) & (y_te == 0)).sum()
-        n  = len(y_te)
-        nb_model.append(tp / n - fp / n * t / (1 - t))
-        tp_all = (y_te == 1).sum()
-        fp_all = (y_te == 0).sum()
-        nb_all.append(tp_all / n - fp_all / n * t / (1 - t))
-
-    # SHAP (on a small subset for speed)
-    shap_values_out = None
-    shap_X_out = None
+    shap_explainer = None
     if SHAP_OK:
         try:
-            explainer = shap.TreeExplainer(stack.named_estimators_["rf"])
-            shap_X = pd.DataFrame(X_te[:200], columns=FEATURES)
-            shap_values_out = explainer.shap_values(shap_X)
-            shap_X_out = shap_X
+            shap_explainer = shap.TreeExplainer(rf_solo)
         except Exception:
             pass
 
-    return (stack, rf2, xgb2,
-            X_te, y_te, y_prob_stack, y_pred,
-            test_metrics, roc_data,
-            frac_pos, mean_pred,
-            thresholds, f1s, recs, precs, accs,
-            nb_model, nb_all,
-            shap_values_out, shap_X_out)
+    return stack, shap_explainer, Xte, yte, yprob, live_metrics
 
 
-def predict_single(model, values: dict, threshold: float = 0.5):
-    X = pd.DataFrame([values], columns=FEATURES)
-    prob  = model.predict_proba(X)[0, 1]
-    label = int(prob >= threshold)
+# ── Helpers ───────────────────────────────────────────────────────────
+def predict(model, vals: dict, theta: float):
+    X     = pd.DataFrame([vals], columns=FEATURES)
+    prob  = float(model.predict_proba(X)[0, 1])
+    label = int(prob >= theta)
     return label, prob
 
 
-# ──────────────────────────────────────────────────────────────────────
-# MATPLOTLIB HELPER
-# ──────────────────────────────────────────────────────────────────────
-def styled_fig(w=7, h=4.5):
-    with plt.rc_context(PLT_STYLE):
+def fig_ax(w=6.5, h=3.8):
+    with plt.rc_context(PLT_RC):
         fig, ax = plt.subplots(figsize=(w, h))
     fig.patch.set_facecolor("#FAFBFC")
-    ax.set_facecolor("#FAFBFC")
     return fig, ax
 
-def styled_figs(rows, cols, w=12, h=5):
-    with plt.rc_context(PLT_STYLE):
-        fig, axes = plt.subplots(rows, cols, figsize=(w, h))
-    fig.patch.set_facecolor("#FAFBFC")
-    return fig, axes
 
-def show_fig(fig):
+def show(fig):
     st.pyplot(fig, use_container_width=True)
     plt.close(fig)
 
-def metric_card(label, value, sub=""):
+
+def kpi(label, value, sub=""):
     st.markdown(
-        f'<div class="metric-card">'
-        f'<div class="label">{label}</div>'
-        f'<div class="value">{value}</div>'
-        f'<div class="sub">{sub}</div>'
-        f'</div>',
+        f'<div class="kpi"><div class="lbl">{label}</div>'
+        f'<div class="val">{value}</div>'
+        f'<div class="sub">{sub}</div></div>',
         unsafe_allow_html=True,
     )
 
-def insight(text):
-    st.markdown(f'<div class="insight-box">💡 {text}</div>', unsafe_allow_html=True)
+
+def note(txt, warn=False):
+    cls = "warn-box" if warn else "insight"
+    icon = "⚠️" if warn else "💡"
+    st.markdown(f'<div class="{cls}">{icon} {txt}</div>', unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════
+def normal_range(feat, val):
+    """Return (lo, hi) floats for a feature's normal range string."""
+    rng = FEATURE_META[feat]["normal"].replace("–", "-").split("-")
+    return float(rng[0]), float(rng[1])
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# CHART FUNCTIONS — every one recomputed per user interaction
+# ═══════════════════════════════════════════════════════════════════════
+
+def chart_gauge(prob: float, theta: float):
+    """Horizontal gauge bar that moves with every input change."""
+    fig, ax = fig_ax(5.5, 2.0)
+    # background
+    ax.barh(0, 1.0, height=0.5, color=C_LGRAY, edgecolor="none", zorder=1)
+    # filled risk
+    ax.barh(0, prob, height=0.5,
+            color=C_RED if prob >= theta else C_TEAL,
+            edgecolor="none", zorder=2)
+    # threshold line
+    ax.axvline(theta, color=C_NAVY, lw=2.5, zorder=3)
+    ax.text(theta, 0.34, f"θ={theta:.2f}", ha="center",
+            fontsize=8.5, color=C_NAVY, fontweight="700", va="bottom")
+    # risk label
+    side = prob + 0.03 if prob < 0.80 else prob - 0.12
+    ax.text(side, 0, f"{prob:.3f}", va="center", fontsize=12,
+            fontweight="700",
+            color="white" if 0.15 < prob < 0.85 else C_NAVY)
+    # zone labels
+    ax.axvspan(0,     theta, alpha=0.07, color=C_TEAL, zorder=0)
+    ax.axvspan(theta, 1.0,   alpha=0.07, color=C_RED,  zorder=0)
+    ax.text(theta / 2,       -0.38, "Normal zone",
+            ha="center", fontsize=7.5, color=C_TEAL, fontweight="600")
+    ax.text((theta + 1) / 2, -0.38, "Abnormal zone",
+            ha="center", fontsize=7.5, color=C_RED,  fontweight="600")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.55, 0.55)
+    ax.set_yticks([])
+    ax.set_xlabel("Calibrated risk probability", fontsize=9)
+    ax.set_title("Risk Score Gauge", fontweight="bold",
+                 color=C_NAVY, fontsize=10)
+    ax.grid(axis="y", visible=False)
+    plt.tight_layout()
+    return fig
+
+
+def chart_shap(explainer, vals: dict):
+    """
+    Instance-level SHAP bar chart.
+    Fully recomputed for every new set of biomarker values.
+    Returns (fig, sv1_array) or (None, None) if SHAP unavailable.
+    """
+    if explainer is None:
+        return None, None
+    try:
+        X  = pd.DataFrame([vals], columns=FEATURES)
+        sv = explainer.shap_values(X)
+        sv1 = sv[1][0] if isinstance(sv, list) else sv[0]
+
+        fig, ax = fig_ax(6.0, 3.4)
+        order  = np.argsort(np.abs(sv1))
+        colors = [C_RED if v > 0 else C_TEAL for v in sv1[order]]
+        feat_labels = [
+            f"{FEATURES[i]}  =  {vals[FEATURES[i]]:.2f}" for i in order
+        ]
+        bars = ax.barh(feat_labels, sv1[order],
+                       color=colors, height=0.52, edgecolor="none")
+        ax.axvline(0, color=C_NAVY, lw=0.9, linestyle="--")
+        ax.set_xlabel("SHAP value  (+  pushes Abnormal  |  -  pushes Normal)")
+        ax.set_title("Why this prediction?  —  Instance SHAP",
+                     fontweight="bold", color=C_NAVY, fontsize=10)
+        red_p  = mpatches.Patch(color=C_RED,  label="↑ Increases risk")
+        teal_p = mpatches.Patch(color=C_TEAL, label="↓ Decreases risk")
+        ax.legend(handles=[red_p, teal_p], fontsize=8, loc="lower right")
+        for bar, v in zip(bars, sv1[order]):
+            ax.text(
+                v + (0.003 if v >= 0 else -0.003),
+                bar.get_y() + bar.get_height() / 2,
+                f"{v:+.3f}", va="center", fontsize=8,
+                ha="left" if v >= 0 else "right", color=C_NAVY,
+            )
+        plt.tight_layout()
+        return fig, sv1
+    except Exception:
+        return None, None
+
+
+def chart_whatif(model, base_vals: dict, feat: str, theta: float):
+    """
+    Sweeps `feat` across its full range, holds all other features at
+    base_vals, and plots the resulting risk probability curve.
+    Fully redrawn every time base_vals, feat, or theta changes.
+    """
+    m  = FEATURE_META[feat]
+    xs = np.linspace(m["lo"], m["hi"], 300)
+    ps = np.array([
+        float(model.predict_proba(
+            pd.DataFrame([{**base_vals, feat: x}], columns=FEATURES)
+        )[0, 1])
+        for x in xs
+    ])
+    cur_x = base_vals[feat]
+    cur_p = float(model.predict_proba(
+        pd.DataFrame([base_vals], columns=FEATURES)
+    )[0, 1])
+
+    # Normal range shading
+    lo_n, hi_n = normal_range(feat, cur_x)
+
+    fig, ax = fig_ax(7.2, 3.8)
+    ax.axvspan(lo_n, min(hi_n, m["hi"]), alpha=0.10,
+               color=C_TEAL, label=f"Normal range ({m['normal']} {m['unit']})")
+    ax.plot(xs, ps, lw=2.5, color=C_NAVY, zorder=3, label="Risk probability")
+    ax.fill_between(xs, ps, alpha=0.10, color=C_TEAL)
+    ax.axhline(theta, color=C_RED, lw=1.5, ls="--",
+               label=f"Decision threshold θ = {theta:.2f}")
+    ax.axvline(cur_x, color=C_AMBER, lw=2.0, ls=":",
+               label=f"Current value = {cur_x:.2f}")
+    ax.scatter([cur_x], [cur_p], s=90, color=C_AMBER,
+               zorder=5, edgecolors=C_NAVY, lw=1.5)
+    ax.fill_between(xs, theta, 1.02, alpha=0.05, color=C_RED)
+    ax.fill_between(xs, 0,     theta, alpha=0.05, color=C_TEAL)
+    ax.set_xlabel(
+        f"{m['label']}  ({m['unit']})   |   Normal: {m['normal']}",
+        fontsize=9,
+    )
+    ax.set_ylabel("Abnormality probability", fontsize=9)
+    ax.set_title(
+        f"How does risk change as {feat} varies?  "
+        f"(all other features fixed at baseline)",
+        fontweight="bold", color=C_NAVY, fontsize=10,
+    )
+    ax.set_ylim(-0.02, 1.04)
+    ax.legend(fontsize=8, loc="upper right")
+    plt.tight_layout()
+    return fig, xs, ps
+
+
+def chart_confusion(yprob, yte, theta: float):
+    """
+    Confusion matrix for the full test set at the given threshold.
+    Redraws every time the sidebar θ slider moves.
+    """
+    ypred = (np.array(yprob) >= theta).astype(int)
+    yte   = np.array(yte)
+    cm    = confusion_matrix(yte, ypred)
+    tn, fp, fn, tp = cm.ravel() if cm.shape == (2, 2) else (0, 0, 0, 0)
+
+    fnr  = fn / (fn + tp) if (fn + tp) > 0 else 0.0
+    rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    f1   = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+
+    fig, ax = fig_ax(5.0, 3.4)
+    bg = [[C_TEAL, "#F7D9D0"], ["#FDECEA", C_NAVY]]
+    lbl_map = [["TN", "FP"], ["FN ⚠", "TP"]]
+    vals_map = [[f"{tn:,}", f"{fp:,}"], [f"{fn:,}", f"{tp:,}"]]
+
+    ax.set_xlim(0, 2); ax.set_ylim(0, 2)
+    ax.axis("off")
+    for i in range(2):
+        for j in range(2):
+            ax.add_patch(plt.Rectangle(
+                [j, 1 - i], 1, 1,
+                facecolor=bg[i][j], edgecolor="white", lw=2.5,
+            ))
+            txt_color = "white" if (i == 1 and j == 1) else C_NAVY
+            ax.text(j + 0.5, 1.5 - i,
+                    f"{lbl_map[i][j]}\n{vals_map[i][j]}",
+                    ha="center", va="center",
+                    fontsize=12, fontweight="bold", color=txt_color)
+    ax.set_xticks([0.5, 1.5])
+    ax.set_xticklabels(["Pred: Normal", "Pred: Abnormal"], fontsize=9)
+    ax.set_yticks([0.5, 1.5])
+    ax.set_yticklabels(["Actual\nAbnormal", "Actual\nNormal"], fontsize=9)
+    ax.tick_params(left=False, bottom=False)
+    ax.set_title(f"Confusion Matrix — θ = {theta:.2f}",
+                 fontweight="bold", color=C_NAVY, fontsize=10)
+    plt.tight_layout()
+
+    stats = dict(FNR=fnr, Recall=rec, Precision=prec, F1=f1,
+                 TP=tp, FP=fp, TN=tn, FN=fn)
+    return fig, stats
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# MAIN APP
+# ═══════════════════════════════════════════════════════════════════════
 def main():
-    # ── Header ──────────────────────────────────────────────────────
+    # Header
     st.markdown("""
-    <div class="research-header">
+    <div class="hero">
       <h1>🦋 Thyroid Disorder Detection</h1>
-      <p>Explainable Stacking Ensemble · RF + XGBoost → Logistic Regression Meta-Learner
-         &nbsp;|&nbsp; Harmonised UCI Corpus · <b>n = 12,800</b> &nbsp;|&nbsp;
-         SHAP · Calibration · DCA · Robustness · Bootstrap CI</p>
-    </div>
-    """, unsafe_allow_html=True)
+      <p>Calibrated Stacking Ensemble  ·  RF + XGBoost → Logistic Regression
+         ·  Harmonised UCI Corpus  n = 12,800
+         ·  SHAP  ·  Calibration  ·  DCA  ·  Bootstrap CI</p>
+    </div>""", unsafe_allow_html=True)
 
-    # ── Load & train ─────────────────────────────────────────────────
+    # Load data
     try:
         df = load_data("harmonised_dataset.csv")
     except FileNotFoundError:
         st.error("⚠️ `harmonised_dataset.csv` not found. Place it alongside `app.py`.")
         st.stop()
 
-    (model, rf_model, xgb_model,
-     X_te, y_te, y_prob, y_pred,
-     test_metrics, roc_data,
-     frac_pos, mean_pred,
-     thresholds, f1s, recs, precs, accs,
-     nb_model, nb_all,
-     shap_vals, shap_X) = build_model(df)
+    (model, shap_explainer,
+     Xte, yte, yprob_test, live_metrics) = build_model(df)
 
-    # ── Sidebar ──────────────────────────────────────────────────────
+    # ─── Sidebar ──────────────────────────────────────────────────────
     with st.sidebar:
-        st.markdown('<div class="sec-label">Live Model · Test-Set Metrics</div>',
-                    unsafe_allow_html=True)
-        for k, v in test_metrics.items():
-            label_map = {
-                "AUC": "ROC-AUC", "Accuracy": "Accuracy", "Precision": "Precision",
-                "Recall": "Recall (Sensitivity)", "F1": "F1-Score", "Brier": "Brier Score ↓",
-            }
-            st.metric(label_map.get(k, k), v)
-
-        st.divider()
-        st.markdown('<div class="sec-label">Nested CV Results (Paper)</div>',
-                    unsafe_allow_html=True)
-        st.caption("AUC = 0.9836 · Recall = 92.45% · BS = 0.0923")
-
-        st.divider()
-        st.markdown('<div class="sec-label">Pipeline</div>', unsafe_allow_html=True)
-        st.markdown("""
-| | |
-|---|---|
-| Base models | RF + XGBoost |
-| Meta-learner | Logistic Regression |
-| Calibration | Isotonic regression |
-| HPO | Optuna TPE (20 trials) |
-| Validation | Nested 10-fold CV |
-| Dataset | 12,800 patients |
-| Imbalance | 13.4 : 1 |
-        """)
-
-        st.divider()
-        dec_threshold = st.slider(
-            "Decision threshold θ*",
-            min_value=0.05, max_value=0.95,
-            value=OPTIMAL_THETA, step=0.05,
-            help="Optimal θ* = 0.25 (F1-maximising). Drag to explore trade-offs."
+        st.markdown("### ⚙️  Decision Threshold  θ")
+        theta = st.slider(
+            "Drag to explore trade-offs",
+            min_value=0.05, max_value=0.90,
+            value=0.25, step=0.05,
+            help=(
+                "θ* = 0.25 is F1-maximising (from paper). "
+                "Default naïve = 0.50. Lower θ → higher recall, "
+                "more false positives. Higher θ → fewer flags, more missed cases."
+            ),
         )
 
-    # ── Tabs ─────────────────────────────────────────────────────────
-    tabs = st.tabs([
+        # Live FNR preview from the actual test set
+        at_cur = (np.array(yprob_test) >= theta).astype(int)
+        at_50  = (np.array(yprob_test) >= 0.50).astype(int)
+        yte_np = np.array(yte)
+        fn_cur = ((at_cur == 0) & (yte_np == 1)).sum()
+        fn_50  = ((at_50  == 0) & (yte_np == 1)).sum()
+        pos    = (yte_np == 1).sum()
+        fnr_cur = fn_cur / pos
+        fnr_50  = fn_50  / pos
+        st.caption(
+            f"FNR at **θ = {theta:.2f}** → **{fnr_cur:.1%}** "
+            f"&nbsp;|&nbsp; FNR at θ = 0.50 → {fnr_50:.1%}"
+        )
+
+        st.divider()
+        st.markdown("### 📊  Live Test-Set Metrics")
+        st.caption("Computed on 20% held-out split (this session)")
+        label_map = {
+            "AUC":      "ROC-AUC",
+            "Accuracy": "Accuracy",
+            "Precision":"Precision",
+            "Recall":   "Recall (Sensitivity)",
+            "F1":       "F1-Score",
+            "Brier":    "Brier Score ↓",
+        }
+        for k, v in live_metrics.items():
+            st.metric(label_map[k], v)
+
+        st.divider()
+        st.markdown("### 📄  Paper  (Nested 10-Fold CV)")
+        st.caption("IAENG IJCS — Pawar, Mahakalkar, Gaikwad, Neware")
+        st.table(pd.DataFrame([
+            ["AUC",          "0.9836 ± 0.0021"],
+            ["Recall",       "92.45%"],
+            ["F1",           "0.704"],
+            ["Brier Score",  "0.0923  (-29%)"],
+            ["p vs RF",      "0.0039 ★"],
+            ["p vs XGBoost", "0.131 n.s."],
+        ], columns=["Metric", "Value"]).set_index("Metric"))
+
+    # ─── Tabs ─────────────────────────────────────────────────────────
+    tab1, tab2, tab3, tab4 = st.tabs([
         "🔬 Live Prediction",
-        "📋 Sample Dataset",
-        "🧠 SHAP Explainability",
-        "📈 Model Performance",
-        "⚕️ Clinical Utility",
-        "📊 Dataset Overview",
+        "🔄 What-If Explorer",
+        "📋 Sample & Verify",
+        "📑 Research Summary",
     ])
 
-    # ═════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════
     # TAB 1 — LIVE PREDICTION
-    # ═════════════════════════════════════════════════════════════════
-    with tabs[0]:
+    # All output (badge, score, gauge, SHAP bar, context row)
+    # recomputes the moment any number input changes.
+    # ═══════════════════════════════════════════════════════════════
+    with tab1:
         st.subheader("Enter Patient Biomarkers")
         st.caption(
-            "Adjust values below. The model outputs a calibrated risk probability "
-            "and a binary decision at the threshold set in the sidebar."
+            "Every number below is live. Change any value and the gauge, "
+            "risk score, and SHAP bar update immediately — no button needed."
         )
 
-        c1, c2, c3 = st.columns(3)
-        cols = [c1, c2, c3]
+        # Six input widgets
+        cols_in = st.columns(3)
         input_vals = {}
         for i, feat in enumerate(FEATURES):
             m = FEATURE_META[feat]
-            with cols[i % 3]:
+            with cols_in[i % 3]:
                 input_vals[feat] = st.number_input(
-                    label=m["label"],
-                    min_value=float(m["min_value"]),
-                    max_value=float(m["max_value"]),
-                    value=float(m["value"]),
+                    label=f"{m['label']}  ({m['unit']})",
+                    min_value=float(m["lo"]),
+                    max_value=float(m["hi"]),
+                    value=float(m["default"]),
                     step=float(m["step"]),
-                    help=f"{m['help']} | Normal range: {m['normal']}",
+                    help=f"{m['tip']}  ·  Normal: {m['normal']} {m['unit']}",
                     key=f"t1_{feat}",
                 )
+
         st.divider()
 
-        if st.button("🔍 Predict", type="primary", use_container_width=True, key="btn_t1"):
-            label, prob = predict_single(model, input_vals, threshold=dec_threshold)
+        # Predict (runs automatically on every widget change)
+        label, prob = predict(model, input_vals, theta)
 
-            # Risk display
-            col_res, col_gauge = st.columns([3, 2])
-            with col_res:
-                badge = (
-                    '<span class="badge-abnormal">🔴 ABNORMAL</span>'
-                    if label else
-                    '<span class="badge-normal">🟢 NORMAL</span>'
-                )
-                st.markdown(f"**Prediction:** {badge}", unsafe_allow_html=True)
-                st.markdown(f"**Calibrated risk score:** `{prob:.4f}` &nbsp;({prob*100:.1f}%)",
-                            unsafe_allow_html=True)
-                st.markdown(f"**Decision threshold:** `θ = {dec_threshold}`")
-                st.progress(float(prob))
+        # ── Result strip ────────────────────────────────────────────
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            if label == 1:
+                st.error("🔴  **ABNORMAL — Disorder Detected**")
+            else:
+                st.success("🟢  **NORMAL — No Disorder**")
+        with r2:
+            kpi("Calibrated Risk Score",
+                f"{prob:.4f}",
+                f"{prob * 100:.1f}%  abnormality probability")
+        with r3:
+            kpi("Decision Threshold",
+                f"θ = {theta:.2f}",
+                "Adjust in sidebar  ·  Optimal θ* = 0.25")
 
-            with col_gauge:
-                # Mini gauge bar chart
-                fig, ax = styled_fig(3, 2.5)
-                categories = ["Normal", "Abnormal"]
-                values     = [1 - prob, prob]
-                colors     = [C_TEAL, C_RED]
-                bars = ax.barh(categories, values, color=colors,
-                               height=0.5, edgecolor="none")
-                ax.axvline(dec_threshold, color=C_NAVY, lw=1.5,
-                           linestyle="--", label=f"θ = {dec_threshold}")
-                ax.set_xlim(0, 1)
-                ax.set_xlabel("Probability")
-                ax.set_title("Risk Decomposition", fontsize=10, fontweight="bold", color=C_NAVY)
-                ax.legend(fontsize=8)
-                ax.grid(axis="y", visible=False)
-                for bar, v in zip(bars, values):
-                    ax.text(min(v + 0.02, 0.95), bar.get_y() + bar.get_height() / 2,
-                            f"{v:.3f}", va="center", fontsize=9, color=C_NAVY, fontweight="600")
-                plt.tight_layout()
-                show_fig(fig)
+        st.divider()
 
-            # Clinical context
-            if prob >= OPTIMAL_THETA:
-                insight(
-                    f"At the optimised threshold θ* = {OPTIMAL_THETA}, this patient "
-                    f"would be flagged for confirmatory specialist referral. "
-                    f"Lowering θ from 0.50 → 0.25 reduces the false negative rate from "
-                    f"26.6% → 7.9% in the research dataset."
+        # ── Two live charts side-by-side ────────────────────────────
+        c_left, c_right = st.columns(2)
+
+        with c_left:
+            st.markdown(
+                "**Risk Gauge** "
+                "<span class='paper-tag'>LIVE</span>",
+                unsafe_allow_html=True,
+            )
+            show(chart_gauge(prob, theta))
+            if prob >= theta:
+                note(
+                    f"Risk ({prob:.3f}) ≥ θ ({theta:.2f}). "
+                    "Model recommends confirmatory specialist referral. "
+                    f"At θ* = 0.25, FNR drops from 26.6% → 7.9%."
                 )
             else:
-                insight(
-                    "Risk score below the optimised threshold. At θ* = 0.25 the framework "
-                    "achieves 92.09% recall — but no automated tool replaces clinical judgment."
+                note(
+                    f"Risk ({prob:.3f}) < θ ({theta:.2f}). "
+                    "Model predicts normal thyroid function. "
+                    "Not a clinical diagnosis — automated first-pass triage only."
                 )
 
-            # SHAP for this instance (if available)
-            if SHAP_OK and shap_vals is not None:
-                try:
-                    explainer = shap.TreeExplainer(rf_model)
-                    X_inst = pd.DataFrame([input_vals], columns=FEATURES)
-                    sv = explainer.shap_values(X_inst)
-                    # sv shape: (classes, samples, features) or (samples, features)
-                    if isinstance(sv, list):
-                        sv_pos = sv[1][0]
-                    else:
-                        sv_pos = sv[0]
-
-                    st.divider()
-                    st.markdown("**Why this prediction? — Instance-level SHAP attribution**")
-                    fig, ax = styled_fig(7, 3)
-                    feat_names = FEATURES
-                    sorted_idx = np.argsort(np.abs(sv_pos))
-                    colors = [C_RED if v > 0 else C_TEAL for v in sv_pos[sorted_idx]]
-                    ax.barh(
-                        [feat_names[i] for i in sorted_idx],
-                        sv_pos[sorted_idx],
-                        color=colors, edgecolor="none", height=0.55,
+        with c_right:
+            st.markdown(
+                "**Instance SHAP — why this prediction?** "
+                "<span class='paper-tag'>LIVE</span>",
+                unsafe_allow_html=True,
+            )
+            if SHAP_OK and shap_explainer is not None:
+                shap_fig, sv1 = chart_shap(shap_explainer, input_vals)
+                if shap_fig and sv1 is not None:
+                    show(shap_fig)
+                    top_i    = int(np.argmax(np.abs(sv1)))
+                    top_feat = FEATURES[top_i]
+                    top_val  = sv1[top_i]
+                    direction = "toward Abnormal ↑" if top_val > 0 else "toward Normal ↓"
+                    note(
+                        f"Strongest driver: **{top_feat}** "
+                        f"(SHAP = {top_val:+.3f},  {direction}). "
+                        "Red = pushes risk up · Teal = pushes risk down."
                     )
-                    ax.axvline(0, color=C_NAVY, lw=0.8)
-                    ax.set_xlabel("SHAP value (impact on abnormal prediction)")
-                    ax.set_title("Instance SHAP Attribution", fontweight="bold",
-                                 color=C_NAVY, fontsize=11)
-                    red_p = mpatches.Patch(color=C_RED,  label="Pushes → Abnormal")
-                    teal_p= mpatches.Patch(color=C_TEAL, label="Pushes → Normal")
-                    ax.legend(handles=[red_p, teal_p], fontsize=8)
-                    plt.tight_layout()
-                    show_fig(fig)
-                except Exception:
-                    pass
+            else:
+                st.info(
+                    "Install `shap` (`pip install shap`) to enable "
+                    "instance-level explanations."
+                )
 
-    # ═════════════════════════════════════════════════════════════════
-    # TAB 2 — SAMPLE FROM DATASET
-    # ═════════════════════════════════════════════════════════════════
-    with tabs[1]:
-        st.subheader("Load a Sample from the Harmonised Dataset")
-        ca, cb, cc = st.columns([2, 2, 1])
-        with ca:
-            sample_class = st.selectbox(
+        # ── Clinical range context row ───────────────────────────────
+        st.divider()
+        st.markdown("**Clinical range check — current values vs. normal ranges**")
+        ctx_cols = st.columns(len(FEATURES))
+        for i, feat in enumerate(FEATURES):
+            m       = FEATURE_META[feat]
+            v       = input_vals[feat]
+            lo_n, hi_n = normal_range(feat, v)
+            in_rng  = lo_n <= v <= hi_n
+            with ctx_cols[i]:
+                st.metric(
+                    label=f"{feat}",
+                    value=f"{v:.2f}",
+                    delta="✅ Normal" if in_rng else "⚠️ Out of range",
+                    delta_color="off" if in_rng else "inverse",
+                    help=f"Normal: {m['normal']} {m['unit']}",
+                )
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 2 — WHAT-IF EXPLORER
+    # Set a baseline patient, pick one feature to sweep.
+    # Risk curve redraws live — demonstrates HPT nonlinearity.
+    # ═══════════════════════════════════════════════════════════════
+    with tab2:
+        st.subheader("What-If Feature Explorer")
+        st.caption(
+            "Set a baseline patient profile below, then choose one feature to vary "
+            "across its entire clinical range. The risk curve updates live, "
+            "revealing the nonlinear HPT dynamics the ensemble has learnt."
+        )
+
+        st.markdown("**Baseline patient  (all features held fixed except the chosen one)**")
+        base_cols_ui = st.columns(3)
+        base_vals    = {}
+        for i, feat in enumerate(FEATURES):
+            m = FEATURE_META[feat]
+            with base_cols_ui[i % 3]:
+                base_vals[feat] = st.number_input(
+                    label=f"{m['label']}  ({m['unit']})",
+                    min_value=float(m["lo"]),
+                    max_value=float(m["hi"]),
+                    value=float(m["default"]),
+                    step=float(m["step"]),
+                    help=f"Normal: {m['normal']} {m['unit']}",
+                    key=f"t2_base_{feat}",
+                )
+
+        sweep_feat = st.selectbox(
+            "Feature to sweep  →",
+            options=FEATURES,
+            index=1,   # TSH by default (most interesting)
+            help="All other features stay at the baseline values set above.",
+            key="t2_sweep",
+        )
+
+        st.divider()
+        st.markdown(
+            f"**Risk curve: how does the model respond to varying  {sweep_feat}?** "
+            "<span class='paper-tag'>LIVE</span>",
+            unsafe_allow_html=True,
+        )
+
+        wi_fig, xs, ps = chart_whatif(model, base_vals, sweep_feat, theta)
+        show(wi_fig)
+
+        # Insight: how many times does the curve cross the threshold?
+        crossings = int((np.diff((ps >= theta).astype(int)) != 0).sum())
+        note(
+            f"Risk curve crosses the decision boundary "
+            f"**{crossings} time(s)** as {sweep_feat} varies from "
+            f"{FEATURE_META[sweep_feat]['lo']} to {FEATURE_META[sweep_feat]['hi']} "
+            f"{FEATURE_META[sweep_feat]['unit']}. "
+            f"Min risk = {ps.min():.3f}  ·  Max risk = {ps.max():.3f}. "
+            "Non-monotonic curves reflect the nonlinear HPT feedback modelled by the ensemble."
+        )
+
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 3 — SAMPLE & VERIFY
+    # Pick a real patient record → predict → show result.
+    # The confusion matrix (bottom) updates with the θ slider.
+    # ═══════════════════════════════════════════════════════════════
+    with tab3:
+        st.subheader("Sample Patient & Verify Against True Label")
+        st.caption(
+            "Select a real record from the harmonised dataset. "
+            "The confusion matrix at the bottom updates live as you move θ."
+        )
+
+        fa, fb, fc = st.columns([2, 2, 1])
+        with fa:
+            cls_filter = st.selectbox(
                 "Filter by true class",
-                ["All", "Normal (0)", "Abnormal (1)"], key="t2_cls"
+                ["All", "Normal (0)", "Abnormal (1)"],
+                key="t3_cls",
             )
-        with cb:
-            sample_idx = st.number_input(
-                "Sample index", min_value=0, max_value=500, value=0, key="t2_idx"
+        with fb:
+            idx_in = st.number_input(
+                "Sample index", min_value=0, max_value=500,
+                value=0, step=1, key="t3_idx",
             )
-        with cc:
-            rand_btn = st.button("🎲 Random", use_container_width=True, key="t2_rand")
+        with fc:
+            rand_btn = st.button("🎲 Random", use_container_width=True, key="t3_rand")
 
-        if sample_class == "Normal (0)":
+        if cls_filter == "Normal (0)":
             subset = df[df["class"] == 0].reset_index(drop=True)
-        elif sample_class == "Abnormal (1)":
+        elif cls_filter == "Abnormal (1)":
             subset = df[df["class"] == 1].reset_index(drop=True)
         else:
             subset = df.reset_index(drop=True)
 
-        chosen = int(np.random.randint(0, len(subset))) if rand_btn else min(int(sample_idx), len(subset) - 1)
-        row = subset.iloc[chosen]
-        sample_vals = {f: float(row[f]) for f in FEATURES}
-        true_label  = int(row["class"])
+        chosen = (
+            int(np.random.randint(0, len(subset))) if rand_btn
+            else min(int(idx_in), len(subset) - 1)
+        )
+        row        = subset.iloc[chosen]
+        samp_vals  = {f: float(row[f]) for f in FEATURES}
+        true_label = int(row["class"])
 
         st.divider()
-        badge_true = "🔴 Abnormal (1)" if true_label else "🟢 Normal (0)"
-        st.markdown(f"**Sample #{chosen}** — True label: **{badge_true}**")
+        true_str = "🔴 Abnormal (1)" if true_label else "🟢 Normal (0)"
+        st.markdown(f"**Sample #{chosen}** — True label: **{true_str}**")
 
-        fc1, fc2, fc3 = st.columns(3)
+        # Feature cards with range check
+        mcols = st.columns(len(FEATURES))
         for i, feat in enumerate(FEATURES):
-            with [fc1, fc2, fc3][i % 3]:
-                st.metric(FEATURE_META[feat]["label"],
-                          f"{sample_vals[feat]:.4f}",
-                          help=f"Normal: {FEATURE_META[feat]['normal']}")
-
-        st.divider()
-        if st.button("🔍 Predict Sample", type="primary",
-                     use_container_width=True, key="t2_pred"):
-            label, prob = predict_single(model, sample_vals, threshold=dec_threshold)
-            col_l, col_r = st.columns(2)
-            with col_l:
-                if label == 1:
-                    st.error(f"🔴 **ABNORMAL** — Risk: {prob:.4f} ({prob*100:.1f}%)")
-                else:
-                    st.success(f"🟢 **NORMAL** — Risk: {prob:.4f} ({prob*100:.1f}%)")
-                st.progress(float(prob))
-            with col_r:
-                match = label == true_label
-                if match:
-                    st.success(f"✅ **Correct prediction** — matched true label {true_label}.")
-                else:
-                    st.warning(
-                        f"⚠️ **Mismatch** — True: {true_label}, Predicted: {label}. "
-                        "Misclassified case (false negative or false positive)."
-                    )
-                st.markdown(f"**Threshold used:** `θ = {dec_threshold}`")
-
-    # ═════════════════════════════════════════════════════════════════
-    # TAB 3 — SHAP EXPLAINABILITY
-    # ═════════════════════════════════════════════════════════════════
-    with tabs[2]:
-        st.subheader("SHAP Explainability — Global & Interaction Analysis")
-        st.caption(
-            "Results from the paper: cross-validated SHAP importances (n = 12,800), "
-            "pairwise interaction decomposition (first application to biochemical thyroid panel data)."
-        )
-
-        col_shap1, col_shap2 = st.columns(2)
-
-        # ── Global SHAP bar (paper values) ──────────────────────────
-        with col_shap1:
-            st.markdown("**Global SHAP Importance — Mean |ϕ|**")
-            fig, ax = styled_fig(5.5, 4)
-            feats = list(PAPER_SHAP.keys())
-            vals  = list(PAPER_SHAP.values())
-            sorted_idx = np.argsort(vals)
-            bar_colors = [C_TEAL if f != "TSH" else C_NAVY for f in np.array(feats)[sorted_idx]]
-            bars = ax.barh(
-                np.array(feats)[sorted_idx], np.array(vals)[sorted_idx],
-                color=bar_colors, height=0.55, edgecolor="none",
-            )
-            ax.set_xlabel("Mean |SHAP value|")
-            ax.set_title("Feature Importance (Cross-validated)", fontweight="bold",
-                         color=C_NAVY, fontsize=11)
-            for bar, v in zip(bars, np.array(vals)[sorted_idx]):
-                ax.text(v + 0.002, bar.get_y() + bar.get_height() / 2,
-                        f"{v:.4f}", va="center", fontsize=8.5, color=C_NAVY)
-            ax.set_xlim(0, 0.32)
-            plt.tight_layout()
-            show_fig(fig)
-            insight(
-                "TSH dominates at 4.7× TT4. Its removal causes ΔAUC = −0.143 — "
-                "~50× larger than any other single feature."
-            )
-
-        # ── Interaction heatmap ─────────────────────────────────────
-        with col_shap2:
-            st.markdown("**SHAP Pairwise Interaction Strengths**")
-            feats_ord = ["TSH", "T3", "TT4", "FTI", "T4U", "age"]
-            n = len(feats_ord)
-            mat = np.zeros((n, n))
-            interactions = {
-                ("TSH","T3"):  0.036, ("T3","TSH"):  0.036,
-                ("T3","TT4"): 0.022, ("TT4","T3"):  0.022,
-                ("T3","FTI"): 0.018, ("FTI","T3"):  0.018,
-                ("TSH","TT4"):0.018, ("TT4","TSH"): 0.018,
-                ("TSH","FTI"):0.016, ("FTI","TSH"): 0.016,
-            }
-            for (r, c), v in interactions.items():
-                ri, ci = feats_ord.index(r), feats_ord.index(c)
-                mat[ri, ci] = v
-            # diagonals = main effects (from SHAP paper values)
-            for i, f in enumerate(feats_ord):
-                mat[i, i] = PAPER_SHAP.get(f, 0)
-
-            fig, ax = styled_fig(5.5, 4)
-            im = ax.imshow(mat, cmap="YlOrRd", aspect="auto")
-            ax.set_xticks(range(n)); ax.set_xticklabels(feats_ord, fontsize=9)
-            ax.set_yticks(range(n)); ax.set_yticklabels(feats_ord, fontsize=9)
-            for i in range(n):
-                for j in range(n):
-                    v = mat[i, j]
-                    if v > 0:
-                        ax.text(j, i, f"{v:.3f}", ha="center", va="center",
-                                fontsize=7.5,
-                                color="white" if v > 0.15 else C_NAVY,
-                                fontweight="bold" if v > 0.015 else "normal")
-            plt.colorbar(im, ax=ax, shrink=0.8, label="Interaction strength")
-            ax.set_title("SHAP Interaction Heatmap", fontweight="bold",
-                         color=C_NAVY, fontsize=11)
-            ax.grid(visible=False)
-            plt.tight_layout()
-            show_fig(fig)
-            insight(
-                "TSH×T3 (0.036) is the strongest coupling — matching the HPT "
-                "negative feedback pathway. All top-5 interactions involve TSH or T3."
-            )
+            m = FEATURE_META[feat]
+            v = samp_vals[feat]
+            lo_n, hi_n = normal_range(feat, v)
+            in_rng = lo_n <= v <= hi_n
+            with mcols[i]:
+                st.metric(
+                    feat, f"{v:.3f}",
+                    delta="Normal ✅" if in_rng else "⚠️ Out of range",
+                    delta_color="off" if in_rng else "inverse",
+                )
 
         st.divider()
 
-        # ── Biomarker Ablation ──────────────────────────────────────
-        st.markdown("**Biomarker Ablation — ΔAUC on TSH Removal (Leave-One-Out)**")
-        fig, ax = styled_fig(9, 3)
-        feats_abl = list(PAPER_ABLATION.keys())
-        deltas    = list(PAPER_ABLATION.values())
-        colors_abl= [C_RED if d < -0.01 else C_AMBER if d < -0.001 else C_TEAL
-                     for d in deltas]
-        bars = ax.bar(feats_abl, deltas, color=colors_abl, width=0.55, edgecolor="none")
-        ax.axhline(0, color=C_NAVY, lw=0.8, linestyle="--")
-        ax.set_ylabel("ΔAUC (vs. full model)")
-        ax.set_title("Leave-One-Out Biomarker Ablation", fontweight="bold",
-                     color=C_NAVY, fontsize=11)
-        for bar, d in zip(bars, deltas):
-            ax.text(bar.get_x() + bar.get_width() / 2, d - 0.006,
-                    f"{d:.3f}", ha="center", va="top", fontsize=9,
-                    color="white" if d < -0.05 else C_NAVY, fontweight="600")
-        ax.set_ylim(-0.17, 0.02)
-        plt.tight_layout()
-        show_fig(fig)
-        insight(
-            "Removing TSH collapses AUC by 0.143 — approximately 50× the impact of "
-            "removing any other single biomarker. TSH is qualitatively indispensable."
-        )
+        # Predict this sample
+        slabel, sprob = predict(model, samp_vals, theta)
 
-        # ── Live SHAP if available ──────────────────────────────────
-        if SHAP_OK and shap_vals is not None:
+        left_s, right_s = st.columns(2)
+
+        with left_s:
+            if slabel == 1:
+                st.error(f"🔴  **ABNORMAL**  —  Risk = {sprob:.4f}")
+            else:
+                st.success(f"🟢  **NORMAL**  —  Risk = {sprob:.4f}")
+            show(chart_gauge(sprob, theta))
+
+        with right_s:
+            # Correct / wrong verdict
+            if slabel == true_label:
+                st.success(
+                    f"✅  **Correct** — model matched true label ({true_label})."
+                )
+            elif true_label == 1 and slabel == 0:
+                st.error(
+                    "❌  **False Negative** — True: Abnormal, Predicted: Normal. "
+                    "Missed case. Try lowering θ in the sidebar."
+                )
+            else:
+                st.warning(
+                    "⚠️  **False Positive** — True: Normal, Predicted: Abnormal. "
+                    "Unnecessary referral. Try raising θ."
+                )
+
+            # Instance SHAP for the sample patient
+            if SHAP_OK and shap_explainer is not None:
+                st.markdown("**Why? — Instance SHAP for this patient**")
+                sfig, _ = chart_shap(shap_explainer, samp_vals)
+                if sfig:
+                    show(sfig)
+
+        # ── Live confusion matrix (responds to θ slider) ─────────────
+        st.divider()
+        st.markdown(
+            "**Confusion Matrix — entire test set at current θ** "
+            "<span class='paper-tag'>UPDATES WITH θ SLIDER</span>",
+            unsafe_allow_html=True,
+        )
+        cm_fig, cm_stats = chart_confusion(yprob_test, yte, theta)
+
+        cm_l, cm_r = st.columns([1, 1])
+        with cm_l:
+            show(cm_fig)
+
+        with cm_r:
+            st.markdown(f"**At θ = {theta:.2f}:**")
+            kpi("False Negative Rate",   f"{cm_stats['FNR']:.1%}",
+                "↓ Lower = fewer missed cases")
+            kpi("Recall (Sensitivity)",  f"{cm_stats['Recall']:.1%}",
+                "% of true abnormal cases caught")
+            kpi("Precision",             f"{cm_stats['Precision']:.1%}",
+                "% of flagged cases that are truly abnormal")
+            kpi("F1-Score",              f"{cm_stats['F1']:.3f}",
+                "Harmonic mean of Precision & Recall")
+
             st.divider()
-            st.markdown("**Live SHAP — Global Importance from Current Test Set (RF base learner)**")
-            fig, ax = styled_fig(8, 3.5)
-            mean_abs = np.abs(
-                shap_vals[1] if isinstance(shap_vals, list) else shap_vals
-            ).mean(axis=0)
-            si = np.argsort(mean_abs)
-            colors_live = [C_TEAL if FEATURES[i] != "TSH" else C_NAVY for i in si]
-            ax.barh([FEATURES[i] for i in si], mean_abs[si],
-                    color=colors_live, height=0.5, edgecolor="none")
-            ax.set_xlabel("Mean |SHAP value|")
-            ax.set_title("SHAP Global Importance (Live · RF Base Learner · n=200)",
-                         fontweight="bold", color=C_NAVY, fontsize=11)
-            plt.tight_layout()
-            show_fig(fig)
+            if abs(theta - 0.25) < 0.01:
+                note(
+                    "θ = 0.25 (optimal). FNR is minimised. "
+                    "This threshold maximises F1 = 0.726 and reduces "
+                    "missed cases from 26.6% → 7.9% (paper result)."
+                )
+            elif theta > 0.45:
+                note(
+                    f"At θ = {theta:.2f}, FNR = {cm_stats['FNR']:.1%}. "
+                    "Many true disorder cases are missed. "
+                    "Lower the threshold for a screening context.",
+                    warn=True,
+                )
+            else:
+                note(
+                    f"θ = {theta:.2f}. FNR = {cm_stats['FNR']:.1%}. "
+                    "Good recall — appropriate for a thyroid screening workflow."
+                )
 
-    # ═════════════════════════════════════════════════════════════════
-    # TAB 4 — MODEL PERFORMANCE
-    # ═════════════════════════════════════════════════════════════════
-    with tabs[3]:
-        st.subheader("Model Performance — ROC · Calibration · Bootstrap CI · Confusion Matrix")
+    # ═══════════════════════════════════════════════════════════════
+    # TAB 4 — RESEARCH SUMMARY
+    # Text and tables only — no static charts.
+    # The panel reads this as a quick reference card.
+    # ═══════════════════════════════════════════════════════════════
+    with tab4:
+        st.subheader("Research Summary")
+        st.caption(
+            "*Explainable Thyroid Disorder Detection via a Calibrated Stacking "
+            "Ensemble: Integrating Robustness Analysis, SHAP Interaction "
+            "Decomposition, and Decision Curve Validation* · "
+            "Pawar, Mahakalkar, Gaikwad, Neware · "
+            "IAENG International Journal of Computer Science (under submission)"
+        )
 
-        # ── Metrics table (paper values) ────────────────────────────
-        st.markdown("**Nested 10-Fold Cross-Validation Results (from paper)**")
-        perf_rows = []
-        for model_name, m in PAPER_METRICS.items():
-            perf_rows.append({
-                "Model": model_name,
-                "AUC (μ±σ)": f"{m['AUC']:.4f}",
-                "Accuracy":  f"{m['Acc']:.2%}",
-                "Precision": f"{m['Prec']:.2%}",
-                "Recall":    f"{m['Rec']:.2%}",
-                "F1":        f"{m['F1']:.3f}",
-            })
-        perf_df = pd.DataFrame(perf_rows).set_index("Model")
+        # Six contributions
+        st.markdown("#### Six Methodological Contributions")
+        for num, title, detail in [
+            ("1", "Multi-repository harmonisation",
+             "Three UCI thyroid datasets → unified 12,800-record corpus · "
+             "11,913 normal / 887 abnormal  (13.4 : 1 imbalance)"),
+            ("2", "Nested 10-fold cross-validation",
+             "Inner loop tunes hyperparameters; outer loop evaluates — "
+             "eliminates the optimistic bias present in all compared works"),
+            ("3", "Isotonic probability calibration",
+             "Brier Score = 0.0923 · 29% below naïve baseline · "
+             "required for clinically actionable risk communication"),
+            ("4", "Five-channel SHAP explainability",
+             "MI + PI + RFE + SHAP global attribution + biomarker ablation "
+             "all converge on TSH (ΔAUC = -0.143 on removal)"),
+            ("5", "SHAP pairwise interaction decomposition",
+             "First application to biochemical thyroid panel · "
+             "TSH×T3 = 0.036 matches the HPT negative-feedback pathway"),
+            ("6", "Decision Curve Analysis + threshold optimisation",
+             "78% relative net benefit gain over treat-all at θ = 0.25 · "
+             "FNR: 26.6% → 7.9%  ·  F1: 0.699 → 0.726"),
+        ]:
+            st.markdown(
+                f'<div class="insight"><b>#{num} · {title}</b> — {detail}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.divider()
+        st.markdown("#### Nested 10-Fold CV — All Models")
         st.dataframe(
-            perf_df.style.apply(
-                lambda x: ["background: #EEF7F6; font-weight:700"
-                           if x.name == "Stacking" else "" for _ in x],
-                axis=1,
+            pd.DataFrame([
+                {"Model":"Random Forest",   "AUC":"0.9830±0.0029","Acc":"94.30%",
+                 "Prec":"55.40%","Recall":"94.93%","F1":"0.699","BS":"—"},
+                {"Model":"XGBoost",         "AUC":"0.9832±0.0039","Acc":"96.23%",
+                 "Prec":"82.24%","Recall":"58.40%","F1":"0.682","BS":"—"},
+                {"Model":"MLP",             "AUC":"0.8978±0.0193","Acc":"92.87%",
+                 "Prec":"41.68%","Recall":"6.09%", "F1":"0.104","BS":"—"},
+                {"Model":"Stacking (ours)", "AUC":"0.9836±0.0021","Acc":"94.62%",
+                 "Prec":"56.87%","Recall":"92.45%","F1":"0.704","BS":"0.0923"},
+            ]).set_index("Model").style.apply(
+                lambda x: [
+                    "background:#EEF7F6;font-weight:700"
+                    if x.name == "Stacking (ours)" else "" for _ in x
+                ], axis=1,
             ),
             use_container_width=True,
         )
-        insight(
-            "Stacking achieves highest AUC (0.9836) with lowest inter-fold variance. "
-            "Wilcoxon test: Stack vs RF p = 0.0039* (significant); vs XGBoost p = 0.131 n.s."
+        st.caption(
+            "Wilcoxon signed-rank: Stack vs RF p = 0.0039 ★  ·  "
+            "Stack vs XGBoost p = 0.131 n.s.  ·  "
+            "Bootstrap 95% CI for AUC = [0.9778, 0.9868]  (width = 0.009)"
         )
 
         st.divider()
-        row1_l, row1_r = st.columns(2)
-
-        # ── ROC Curves ──────────────────────────────────────────────
-        with row1_l:
-            st.markdown("**ROC Curves — All Models (Live Test Set)**")
-            fig, ax = styled_fig(5.5, 4.5)
-            model_colors = {
-                "Stacking": C_NAVY,
-                "RF":       C_TEAL,
-                "XGBoost":  C_AMBER,
-            }
-            for mname, (fpr, tpr, _) in roc_data.items():
-                auc = roc_auc_score(
-                    y_te,
-                    model.predict_proba(pd.DataFrame(X_te, columns=FEATURES))[:, 1]
-                    if mname == "Stacking"
-                    else (rf_model if mname == "RF" else xgb_model)
-                        .predict_proba(X_te)[:, 1]
-                )
-                lw = 2.5 if mname == "Stacking" else 1.5
-                ls = "-"  if mname == "Stacking" else "--"
-                ax.plot(fpr, tpr, lw=lw, ls=ls,
-                        color=model_colors[mname],
-                        label=f"{mname} (AUC={auc:.4f})")
-            ax.plot([0, 1], [0, 1], ":", color=C_DGRAY, lw=1)
-            ax.set_xlabel("False Positive Rate")
-            ax.set_ylabel("True Positive Rate")
-            ax.set_title("ROC Curves", fontweight="bold", color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=8.5, loc="lower right")
-            ax.set_xlim(0, 1); ax.set_ylim(0, 1.02)
-            plt.tight_layout()
-            show_fig(fig)
-
-        # ── Calibration Curve ────────────────────────────────────────
-        with row1_r:
-            st.markdown("**Calibration (Reliability) Diagram**")
-            fig, ax = styled_fig(5.5, 4.5)
-            ax.plot([0, 1], [0, 1], ":", color=C_DGRAY, lw=1.5, label="Perfect calibration")
-            ax.plot(mean_pred, frac_pos, "o-", color=C_TEAL, lw=2,
-                    markersize=6, label=f"Stacking (BS={test_metrics['Brier']:.4f})")
-            ax.fill_between(mean_pred, frac_pos,
-                            np.interp(mean_pred, [0, 1], [0, 1]),
-                            alpha=0.12, color=C_TEAL)
-            ax.set_xlabel("Mean Predicted Probability")
-            ax.set_ylabel("Fraction of Positives")
-            ax.set_title("Calibration Diagram", fontweight="bold", color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=8.5)
-            ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-            plt.tight_layout()
-            show_fig(fig)
-            insight(
-                f"Brier Score = {PAPER_BRIER} — 29% improvement over the naïve baseline "
-                f"(BS ≈ 0.130). Isotonic regression aligns predicted risk with true event rates."
-            )
-
-        st.divider()
-        row2_l, row2_r = st.columns(2)
-
-        # ── Bootstrap CIs ────────────────────────────────────────────
-        with row2_l:
-            st.markdown("**Bootstrap 95% Confidence Intervals (n = 1,000 resamples)**")
-            fig, ax = styled_fig(5.5, 3.8)
-            metrics_b = list(PAPER_BOOT_CI.keys())
-            vals_b    = [PAPER_BOOT_CI[m][0] for m in metrics_b]
-            lows_b    = [PAPER_BOOT_CI[m][1] for m in metrics_b]
-            highs_b   = [PAPER_BOOT_CI[m][2] for m in metrics_b]
-            errs_lo   = [v - l for v, l in zip(vals_b, lows_b)]
-            errs_hi   = [h - v for v, h in zip(vals_b, highs_b)]
-            y_pos     = np.arange(len(metrics_b))
-            ax.barh(y_pos, vals_b, height=0.4, color=C_TEAL, alpha=0.85,
-                    label="Point estimate", edgecolor="none")
-            ax.errorbar(vals_b, y_pos,
-                        xerr=[errs_lo, errs_hi],
-                        fmt="none", color=C_NAVY, capsize=6, lw=2, capthick=2)
-            ax.set_yticks(y_pos); ax.set_yticklabels(metrics_b)
-            ax.set_xlabel("Metric value")
-            ax.set_title("Bootstrap 95% CIs", fontweight="bold", color=C_NAVY, fontsize=11)
-            ax.set_xlim(0.55, 1.05)
-            for i, (v, lo, hi) in enumerate(zip(vals_b, lows_b, highs_b)):
-                ax.text(hi + 0.005, i, f"[{lo:.4f}, {hi:.4f}]",
-                        va="center", fontsize=7.5, color=C_DGRAY)
-            plt.tight_layout()
-            show_fig(fig)
-            insight("AUC CI width = 0.009 confirms high estimation precision.")
-
-        # ── Confusion Matrix ─────────────────────────────────────────
-        with row2_r:
-            st.markdown("**Confusion Matrix (Stacking Ensemble, θ = 0.50, from paper)**")
-            fig, ax = styled_fig(5.5, 3.8)
-            cm = np.array(PAPER_CONFUSION)
-            im = ax.imshow(cm, cmap="Blues", aspect="auto")
-            labels = [["TN", "FP"], ["FN", "TP"]]
-            true_labels = ["Normal", "Abnormal"]
-            pred_labels = ["Pred: Normal", "Pred: Abnormal"]
-            for i in range(2):
-                for j in range(2):
-                    ax.text(j, i, f"{labels[i][j]}\n{cm[i,j]:,}",
-                            ha="center", va="center", fontsize=11,
-                            color="white" if cm[i, j] > 5000 else C_NAVY,
-                            fontweight="bold")
-            ax.set_xticks([0, 1]); ax.set_xticklabels(pred_labels, fontsize=9)
-            ax.set_yticks([0, 1]); ax.set_yticklabels(true_labels, fontsize=9)
-            ax.set_title("Confusion Matrix (θ = 0.50)", fontweight="bold",
-                         color=C_NAVY, fontsize=11)
-            ax.grid(visible=False)
-            plt.tight_layout()
-            show_fig(fig)
-            insight(
-                "At θ* = 0.25, FN drops from 236 → ~70 (FNR: 26.6% → 7.9%). "
-                "In thyroid screening, minimising missed cases is the clinical priority."
-            )
-
-    # ═════════════════════════════════════════════════════════════════
-    # TAB 5 — CLINICAL UTILITY
-    # ═════════════════════════════════════════════════════════════════
-    with tabs[4]:
-        st.subheader("Clinical Utility — DCA · Threshold Optimisation · Robustness")
-
-        row_c1, row_c2 = st.columns(2)
-
-        # ── Decision Curve Analysis ──────────────────────────────────
-        with row_c1:
-            st.markdown("**Decision Curve Analysis**")
-            fig, ax = styled_fig(5.5, 4.2)
-            th_plot = thresholds[(thresholds >= 0.01) & (thresholds <= 0.50)]
-            nb_m    = np.array(nb_model)[(thresholds >= 0.01) & (thresholds <= 0.50)]
-            nb_a    = np.array(nb_all)[(thresholds >= 0.01) & (thresholds <= 0.50)]
-            ax.plot(th_plot, nb_m, lw=2.5, color=C_NAVY, label="Stacking Ensemble")
-            ax.plot(th_plot, nb_a, lw=1.5, color=C_RED, ls="--", label="Treat All")
-            ax.axhline(0, color=C_DGRAY, lw=1, ls=":", label="Treat None")
-            ax.axvline(OPTIMAL_THETA, color=C_TEAL, lw=1.5,
-                       ls="--", label=f"θ* = {OPTIMAL_THETA}")
-            ax.set_xlabel("Decision Threshold")
-            ax.set_ylabel("Net Benefit")
-            ax.set_title("Decision Curve Analysis", fontweight="bold",
-                         color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=8.5)
-            ax.set_xlim(0.01, 0.50)
-            plt.tight_layout()
-            show_fig(fig)
-            insight(
-                "At θ = 0.25: Net benefit = 0.073 vs. Treat-All = 0.041 → "
-                "78% relative gain. The model dominates both reference strategies "
-                "across the full clinically plausible range (0.05–0.40)."
-            )
-
-        # ── Threshold Sweep ─────────────────────────────────────────
-        with row_c2:
-            st.markdown("**Threshold Optimisation — F1, Recall, Precision**")
-            fig, ax = styled_fig(5.5, 4.2)
-            th_range = (thresholds >= 0.05) & (thresholds <= 0.80)
-            ax.plot(thresholds[th_range], np.array(f1s)[th_range],
-                    lw=2.5, color=C_NAVY, label="F1-Score")
-            ax.plot(thresholds[th_range], np.array(recs)[th_range],
-                    lw=1.5, color=C_TEAL, ls="--", label="Recall")
-            ax.plot(thresholds[th_range], np.array(precs)[th_range],
-                    lw=1.5, color=C_AMBER, ls="--", label="Precision")
-            ax.axvline(OPTIMAL_THETA, color=C_RED, lw=2, ls=":",
-                       label=f"θ* = {OPTIMAL_THETA} (F1-max)")
-            ax.axvline(0.50, color=C_DGRAY, lw=1, ls=":",
-                       label="Default θ = 0.50")
-            ax.set_xlabel("Decision Threshold θ")
-            ax.set_ylabel("Metric Value")
-            ax.set_title("Threshold Sweep", fontweight="bold", color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=8)
-            ax.set_xlim(0.05, 0.80)
-            plt.tight_layout()
-            show_fig(fig)
-            insight(
-                "θ* = 0.25 maximises F1 = 0.726 and reduces FNR from 26.6% → 7.9%. "
-                "The default θ = 0.50 is inappropriate for 6.93% class prevalence."
-            )
-
-        st.divider()
-        st.markdown("**Robustness Profile — Gaussian Noise vs. Random Feature Missingness**")
-
-        row_r1, row_r2 = st.columns(2)
-
-        # ── Noise Robustness ─────────────────────────────────────────
-        with row_r1:
-            fig, ax = styled_fig(5, 3.5)
-            ax.plot(PAPER_NOISE_X, PAPER_NOISE_AUC,
-                    "o-", color=C_RED, lw=2.5, markersize=8, label="AUC under noise")
-            ax.axhline(PAPER_NOISE_AUC[0], color=C_DGRAY, lw=1, ls=":", label="Baseline")
-            for x, y in zip(PAPER_NOISE_X, PAPER_NOISE_AUC):
-                ax.text(x, y + 0.01, f"{y:.4f}", ha="center", fontsize=8.5,
-                        color=C_NAVY, fontweight="600")
-            ax.set_ylim(0.55, 1.02)
-            ax.set_xlabel("Gaussian Noise Level (γ × feature σ)")
-            ax.set_ylabel("AUC")
-            ax.set_title("Noise Robustness", fontweight="bold", color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=8)
-            plt.tight_layout()
-            show_fig(fig)
-
-        # ── Missingness Robustness ────────────────────────────────────
-        with row_r2:
-            fig, ax = styled_fig(5, 3.5)
-            ax.plot(PAPER_MISSING_X, PAPER_MISSING_AUC,
-                    "s-", color=C_TEAL, lw=2.5, markersize=8,
-                    label="AUC under missingness")
-            ax.axhline(PAPER_MISSING_AUC[0], color=C_DGRAY, lw=1, ls=":", label="Baseline")
-            for x, y in zip(PAPER_MISSING_X, PAPER_MISSING_AUC):
-                ax.text(x, y + 0.008, f"{y:.4f}", ha="center", fontsize=8.5,
-                        color=C_NAVY, fontweight="600")
-            ax.set_ylim(0.88, 1.02)
-            ax.set_xlabel("Random Feature Missingness Rate")
-            ax.set_ylabel("AUC")
-            ax.set_title("Missingness Robustness", fontweight="bold",
-                         color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=8)
-            plt.tight_layout()
-            show_fig(fig)
-
-        insight(
-            "Asymmetric degradation: AUC = 0.935 at 30% missingness (robust) but "
-            "AUC = 0.663 at 20% Gaussian noise (sensitive). "
-            "→ Measurement quality for TSH/TT4 matters more than panel completeness."
+        st.markdown("#### SHAP Feature Importance  (cross-validated, n = 12,800)")
+        st.dataframe(
+            pd.DataFrame([
+                {"Feature":"TSH","Mean |ϕ|":0.2682,"MI":0.1301,"PI":"+0.0684",
+                 "Rank":1,"Key finding":"4.7× TT4 · ΔAUC = -0.143 on removal"},
+                {"Feature":"TT4","Mean |ϕ|":0.0565,"MI":0.0361,"PI":"+0.0043",
+                 "Rank":2,"Key finding":"Total thyroxine secretion"},
+                {"Feature":"T3", "Mean |ϕ|":0.0534,"MI":0.0482,"PI":"+0.0076",
+                 "Rank":3,"Key finding":"Active hormone · TSH×T3 interaction = 0.036"},
+                {"Feature":"FTI","Mean |ϕ|":0.0480,"MI":0.0388,"PI":"+0.0022",
+                 "Rank":4,"Key finding":""},
+                {"Feature":"T4U","Mean |ϕ|":0.0407,"MI":0.0115,"PI":"-0.0117",
+                 "Rank":5,"Key finding":"Negative PI — permutation has no effect"},
+                {"Feature":"age","Mean |ϕ|":0.0051,"MI":0.0057,"PI":"-0.0116",
+                 "Rank":6,"Key finding":"Demographic proxy only"},
+            ]).set_index("Feature"),
+            use_container_width=True,
+        )
+        st.caption(
+            "Top-5 SHAP interactions: TSH×T3=0.036 · T3×TT4=0.022 · "
+            "T3×FTI=0.018 · TSH×TT4=0.018 · TSH×FTI=0.016  — "
+            "all involve TSH or T3, consistent with HPT regulatory biology."
         )
 
-    # ═════════════════════════════════════════════════════════════════
-    # TAB 6 — DATASET OVERVIEW
-    # ═════════════════════════════════════════════════════════════════
-    with tabs[5]:
-        st.subheader("Harmonised Dataset Overview")
-
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total Samples", f"{len(df):,}")
-        c2.metric("Features", len(FEATURES))
-        c3.metric("Normal (0)", f"{(df['class']==0).sum():,}  (93.07%)")
-        c4.metric("Abnormal (1)", f"{(df['class']==1).sum():,}  (6.93%)")
-        c5.metric("Class Imbalance", "13.4 : 1")
-
         st.divider()
-
-        col_d1, col_d2 = st.columns(2)
-
-        with col_d1:
-            st.markdown("**Class Distribution**")
-            fig, ax = styled_fig(4.5, 3.2)
-            counts = [int((df['class']==0).sum()), int((df['class']==1).sum())]
-            bars = ax.bar(["Normal (0)", "Abnormal (1)"], counts,
-                          color=[C_TEAL, C_RED], width=0.5, edgecolor="none")
-            for bar, v in zip(bars, counts):
-                ax.text(bar.get_x() + bar.get_width() / 2, v + 80,
-                        f"{v:,}", ha="center", fontsize=10, color=C_NAVY, fontweight="600")
-            ax.set_ylabel("Count")
-            ax.set_title("Class Distribution", fontweight="bold", color=C_NAVY, fontsize=11)
-            ax.set_ylim(0, max(counts) * 1.12)
-            plt.tight_layout()
-            show_fig(fig)
-
-        with col_d2:
-            st.markdown("**Feature Distributions — Median by Class**")
-            fig, ax = styled_fig(4.5, 3.2)
-            meds_norm = df[df["class"]==0][FEATURES].median().values
-            meds_abn  = df[df["class"]==1][FEATURES].median().values
-            # Normalise to [0,1] for radar-like bar comparison
-            max_vals = np.maximum(meds_norm, meds_abn)
-            max_vals[max_vals == 0] = 1
-            x = np.arange(len(FEATURES))
-            w = 0.35
-            ax.bar(x - w/2, meds_norm / max_vals, w, label="Normal",
-                   color=C_TEAL, edgecolor="none")
-            ax.bar(x + w/2, meds_abn / max_vals, w, label="Abnormal",
-                   color=C_RED, alpha=0.85, edgecolor="none")
-            ax.set_xticks(x); ax.set_xticklabels(FEATURES)
-            ax.set_ylabel("Relative median (normalised)")
-            ax.set_title("Median Feature Values by Class", fontweight="bold",
-                         color=C_NAVY, fontsize=11)
-            ax.legend(fontsize=9)
-            plt.tight_layout()
-            show_fig(fig)
-
-        st.divider()
-        st.markdown("**Descriptive Statistics**")
-        st.dataframe(df[FEATURES + ["class"]].describe().round(4),
-                     use_container_width=True)
-
-        st.divider()
-        st.markdown("**Feature Medians by Class**")
-        st.dataframe(df.groupby("class")[FEATURES].median().round(4),
-                     use_container_width=True)
+        st.markdown("#### Robustness Profile  (from paper)")
+        st.dataframe(
+            pd.DataFrame([
+                {"Experiment":"Gaussian noise  5%",    "AUC":0.7350,"ΔAUC":-0.149,"Assessment":"Sensitive"},
+                {"Experiment":"Gaussian noise 10%",    "AUC":0.6933,"ΔAUC":-0.290,"Assessment":"Sensitive"},
+                {"Experiment":"Gaussian noise 20%",    "AUC":0.6625,"ΔAUC":-0.320,"Assessment":"Sensitive"},
+                {"Experiment":"Missing features 10%",  "AUC":0.9688,"ΔAUC":-0.015,"Assessment":"Robust"},
+                {"Experiment":"Missing features 20%",  "AUC":0.9523,"ΔAUC":-0.030,"Assessment":"Robust"},
+                {"Experiment":"Missing features 30%",  "AUC":0.9345,"ΔAUC":-0.048,"Assessment":"Robust"},
+            ]).set_index("Experiment"),
+            use_container_width=True,
+        )
+        note(
+            "Asymmetric degradation: robust to feature missingness (AUC = 0.935 at 30%), "
+            "sensitive to Gaussian noise (AUC = 0.663 at 20%). "
+            "→ TSH/TT4 measurement precision matters more than panel completeness "
+            "for deployment infrastructure decisions."
+        )
 
 
-# ──────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     main()
