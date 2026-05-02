@@ -428,7 +428,7 @@ def main():
     # Header
     st.markdown("""
     <div class="hero">
-      <h1>🦋 Thyroid Disorder Detection</h1>
+      <h1> Thyroid Disorder Detection</h1>
       <p>Calibrated Stacking Ensemble  ·  RF + XGBoost → Logistic Regression
          ·  Harmonised UCI Corpus  n = 12,800
          ·  SHAP  ·  Calibration  ·  DCA  ·  Bootstrap CI</p>
@@ -500,10 +500,10 @@ def main():
 
     # ─── Tabs ─────────────────────────────────────────────────────────
     tab1, tab2, tab3, tab4 = st.tabs([
-        "🔬 Live Prediction",
-        "🔄 What-If Explorer",
-        "📋 Sample & Verify",
-        "📑 Research Summary",
+        " Live Prediction",
+        " What-If Explorer",
+        " Sample & Verify",
+        " Research Summary",
     ])
 
     # ═══════════════════════════════════════════════════════════════
